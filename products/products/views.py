@@ -1,99 +1,107 @@
-# views.py
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
 import requests
-import logging
+from django.http import JsonResponse
+from django.urls import path
+from django.views.decorators.http import require_GET
+from uuid import uuid4
 
-import logging
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-import requests
+# Authentication details
+AUTH_URL = "http://20.244.56.144/test/auth"
+AUTH_BODY = {
+    "companyName": "KL University",
+    "clientID": "18fa805a-cbd2-4f64-bc72-6977f98548fa",
+    "clientSecret": "nvkcOntPlUkJSGbU",
+    "ownerName": "Uppu Jyothi Naga Pavan",
+    "ownerEmail": "pavanuppu2002@gmail.com",
+    "rollNo": "2100030563"
+}
 
-logger = logging.getLogger(__name__)
+def get_access_token():
+    try:
+        response = requests.post(AUTH_URL, json=AUTH_BODY)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("access_token")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to get access token: {e}")
+        return None
 
-class TopProductsAPIView(APIView):
-    def get(self, request, category_name):
-        company_names = ["AMZ", "FLP", "SNP", "MYN", "AZO"]
-        top_n = int(request.GET.get('top', 10))
-        min_price = float(request.GET.get('minPrice', 0))
-        max_price = float(request.GET.get('maxPrice', float('inf')))
-        sort_by = request.GET.get('sortBy', 'rating')  # Default sorting by rating
+# List of companies to fetch data from
+COMPANIES = ["AMZ", "FLP", "SNP", "MYN", "AZO"]
 
-        if top_n > 10:
-            page = int(request.GET.get('page', 1))
-        else:
-            page = 1
+# Step 2: Create the main function to fetch and aggregate products from multiple companies
 
-        products = []
+def fetch_products(cn, can, n, minp, maxp, access_token):
+    url = f"http://20.244.56.144/test/companies/{cn}/categories/{can}/products"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {"top": n, "minPrice": minp, "maxPrice": maxp}
 
-        client_id = "18fa805a-cbd2-4f64-bc72-6977f98548fa"
-        client_secret = "nvkcOntPlUkJSGbU"
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to fetch products for company {cn}: {e}")
+        return []
 
-        for company_name in company_names:
-            url = f'http://20.244.56.144/test/companies/{company_name}/categories/{category_name}/products'
-            params = {
-                'top': top_n,
-                'minPrice': min_price,
-                'maxPrice': max_price,
-                'sortBy': sort_by
-            }
-            
-            headers = {
-                'clientID': client_id,
-                'clientSecret': client_secret
-            }
+@require_GET
+def top_products(request, category_name):
+    access_token = get_access_token()
+    print(access_token)
+    if not access_token:
+        return JsonResponse({"error": "Failed to authenticate"}, status=500)
 
-            try:
-                response = requests.get(url, params=params, headers=headers)
-                response.raise_for_status()  # Raise an exception for bad responses (e.g., 404, 500)
+    n = int(request.GET.get("n", 10))
+    pg = int(request.GET.get("pg", 1))
+    minp = float(request.GET.get("minPrice", 0))
+    maxp = float(request.GET.get("maxPrice", 1000000))
+    sort_by = request.GET.get("sortBy", "price")
+    order = request.GET.get("order", "asc")
 
-                if response.status_code == 200:
-                    products.extend(response.json())
-                else:
-                    return Response(f'Failed to fetch data from {company_name}: {response.text}', status=status.HTTP_400_BAD_REQUEST)
+    all_products = []
+    for company in COMPANIES:
+        products = fetch_products(company, category_name, n, minp, maxp, access_token)
+        for product in products:
+            product["company"] = company
+            product["category"] = category_name
+            product["id"] = str(uuid4())  # Generate a unique ID for each product
+        all_products.extend(products)
 
-            except requests.exceptions.RequestException as e:
-                logger.error(f'Error occurred while fetching data from {company_name}: {str(e)}')
-                return Response(f'Error occurred while fetching data from {company_name}: {str(e)}', status=status.HTTP_400_BAD_REQUEST)
+    rorder = order == "desc"
+    all_products = sorted(all_products, key=lambda x: x.get(sort_by, 0), reverse=rorder)
 
-        # Sort products based on sortBy parameter
-        products.sort(key=lambda x: x.get(sort_by, 0), reverse=True)  # Sorting in descending order
+    total_products = len(all_products)
+    start_index = (pg - 1) * n
+    end_index = start_index + n
+    paginated_products = all_products[start_index:end_index]
 
-        # Pagination
-        start_index = (page - 1) * top_n
-        end_index = start_index + top_n
-        paginated_products = products[start_index:end_index]
+    response_data = {
+        "total_products": total_products,
+        "total_pages": (total_products + n - 1) // n,
+        "current_page": pg,
+        "products": paginated_products,
+    }
 
-        return Response(paginated_products)
+    return JsonResponse(response_data)
 
+@require_GET
+def product_detail(request, category_name, product_id):
+    access_token = get_access_token()
+    if not access_token:
+        return JsonResponse({"error": "Failed to authenticate"}, status=500)
 
+    # Search for the product in the previously fetched products
+    # In a real-world application, you might want to store these in a cache or database
+    all_products = []
+    for company in COMPANIES:
+        products = fetch_products(company, category_name, 1000, 0, 1000000, access_token)
+        for product in products:
+            product["company"] = company
+            product["category"] = category_name
+            product["id"] = str(uuid4())
+        all_products.extend(products)
 
-logger = logging.getLogger(__name__)
+    for product in all_products:
+        if product["id"] == product_id:
+            return JsonResponse(product)
 
-class ProductDetailsAPIView(APIView):
-    def get(self, request, category_name, product_id):
-        client_id = "18fa805a-cbd2-4f64-bc72-6977f98548fa"
-        client_secret = "nvkcOntPlUkJSGbU"
-        
-        url = f'http://20.244.56.144/test/companies/AMZ/categories/{category_name}/products/{product_id}'
-        
-        headers = {
-            'clientID': client_id,
-            'clientSecret': client_secret
-        }
-
-        try:
-            response = requests.get(url, headers=headers)
-            response.raise_for_status()  # Raise an exception for bad responses (e.g., 404, 500)
-
-            if response.status_code == 200:
-                product_details = response.json()
-                return Response(product_details)
-            else:
-                return Response(f'Failed to fetch product details for product_id {product_id}: {response.text}', status=response.status_code)
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f'Error occurred while fetching product details for product_id {product_id}: {str(e)}')
-            return Response(f'Error occurred while fetching product details for product_id {product_id}: {str(e)}', status=status.HTTP_400_BAD_REQUEST)
+    return JsonResponse({"error": "Product not found"}, status=404)
